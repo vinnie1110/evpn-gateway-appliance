@@ -8,12 +8,13 @@ SHELL := /bin/bash
 verify: check
 
 # Static source checks aggregating the planning-docs corpus integrity, the
-# public-safety scan, the repo-wide yaml lint, and the Ansible collection checks.
+# public-safety scan, the repo-wide yaml, Markdown and python lint, and the Ansible
+# collection checks.
 .PHONY: check
-check: check-corpus check-public check-yaml check-ansible
+check: check-corpus check-public check-yaml check-markdown check-python check-ansible
 
-# Planning-docs corpus integrity: link + anchor + pin resolution, embedded-snippet
-# tests, and public-safe over the plans/ docs (check-all.sh bundles them).
+# Planning-docs corpus integrity: link + anchor + pin resolution and public-safe
+# over the plans/ docs (check-all.sh bundles them).
 #
 #   make check-corpus            full run (link + pin checks need network + authenticated gh)
 #   make check-corpus OFFLINE=1  skip the network/gh checks (link + pin resolution)
@@ -48,6 +49,23 @@ check-yaml:
 	# in the check-ansible-lint target, so linting it here too would be redundant.
 	git ls-files -z -c -o --exclude-standard -- '*.yml' '*.yaml' '*.yamllint' ':(exclude)ansible/' | xargs -0 -r yamllint -c .yamllint --
 
+# Repo-wide Markdown lint with the root .markdownlint-cli2.jsonc (tool and host setup:
+# ci/markdownlint/README.md). markdownlint-cli2 reads arguments as globs; a leading ':'
+# makes each Git-selected path literal. Require the root config instead of falling back
+# to native defaults when it is missing.
+.PHONY: check-markdown
+check-markdown:
+	git ls-files -z -c -o --exclude-standard -- '*.md' | sed -z 's/^/:/' | xargs -0 -r markdownlint-cli2 --config .markdownlint-cli2.jsonc --
+
+# Repo-wide Python lint with Ruff (installed in Dockerfile.ci). --config applies the root
+# .ruff.toml everywhere, so a Ruff config in a subdirectory can't override it; --no-cache
+# because Ruff fails if it can't write a cache, and the image's source tree is read-only.
+# Prefix paths with ./ so a missing @name.py cannot become a Ruff response file.
+# Clear an inherited report destination so host checks cannot overwrite source files.
+.PHONY: check-python
+check-python:
+	git ls-files -z -c -o --exclude-standard -- '*.py' | sed -z 's|^|./|' | xargs -0 -r env -u RUFF_OUTPUT_FILE ruff check --no-cache --config .ruff.toml --
+
 # ── Ansible collection source checks ─────────────────────────────────────────
 # Lint, playbook syntax, collection build + tarball allowlist, and a clean-env
 # install smoke with ansible-builder dependency introspection. Runs under
@@ -55,7 +73,7 @@ check-yaml:
 # touches the network is the install smoke, and only when OFFLINE is unset
 # (then it also resolves galaxy.yml's collection deps). The toolchain
 # (ansible-core, ansible-lint, yamllint, ansible-builder) is pinned in
-# Dockerfile.root.
+# Dockerfile.ci.
 
 # Collection source tree, and an out-of-tree dir for the clean-install smoke
 # (kept outside the checkout so it is neither scanned nor committed).
