@@ -6,7 +6,7 @@ all:
         appliance-a:
           ansible_host: localhost
           ansible_connection: local
-          trunk_interface: simulate
+          trunk_interface: trunk0
 
     cloud_infra:
       hosts:
@@ -15,6 +15,7 @@ all:
           ansible_user: ec2-user
           private_ip: {{ infra_private_ip }}
 
+    # Workload-side VTEPs: standalone VMs (dev) or OCP frr-k8s nodes (prod).
     cloud_workload:
       hosts:
         workload-router:

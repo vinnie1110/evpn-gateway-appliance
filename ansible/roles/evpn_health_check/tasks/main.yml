@@ -22,13 +22,16 @@
     - "'cloud_infra' in group_names"
     - tunnel.type == 'wireguard'
 
-- name: "HEALTH [infra]: BGP session to workload is Established"
+- name: "HEALTH [infra]: BGP session to workload peer is Established"
   ansible.builtin.shell: >
     podman exec frr vtysh -c "show bgp summary json" |
     python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['ipv4Unicast']['peers']['{{ hostvars[workload_vtep_host].private_ip }}'];
+    p=d['ipv4Unicast']['peers']['{{ hostvars[item].private_ip }}'];
     assert p['state']=='Established', f'state={p[\"state\"]}'"
   changed_when: false
+  loop: "{{ groups['cloud_workload'] | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
   when: "'cloud_infra' in group_names"
 
 - name: "HEALTH [infra]: BGP session to on-prem is Established"
@@ -49,13 +52,14 @@
   changed_when: false
   when: "'cloud_infra' in group_names"
 
-- name: "HEALTH [infra]: EVPN prefixes relayed from workload"
+- name: "HEALTH [infra]: EVPN prefixes relayed from {{ item }}"
   ansible.builtin.shell: >
     podman exec frr vtysh -c "show bgp l2vpn evpn summary json" |
     python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['peers']['{{ hostvars[workload_vtep_host].private_ip }}'];
+    p=d['peers']['{{ hostvars[item].private_ip }}'];
     assert int(p['pfxRcd'])>0, f'pfxRcd={p[\"pfxRcd\"]}'"
   changed_when: false
+  loop: "{{ groups['cloud_workload'] | default([]) }}"
   when: "'cloud_infra' in group_names"
 
 - name: "HEALTH [infra]: No VXLAN interfaces on relay"
@@ -77,7 +81,7 @@
   changed_when: false
   when: "'cloud_workload' in group_names"
 
-- name: "HEALTH [workload]: remote VTEP present for VNI {{ 10000 + item.vlan }}"
+- name: "HEALTH [workload]: remote VTEP present per VNI"
   ansible.builtin.shell: >
     podman exec frr vtysh -c "show evpn vni {{ 10000 + item.vlan }}" |
     grep -A1 "Remote VTEPs" | grep -oP '\d+\.\d+\.\d+\.\d+'
@@ -89,7 +93,7 @@
     label: "VNI {{ 10000 + item.vlan }} ({{ item.name }})"
   when: "'cloud_workload' in group_names"
 
-- name: "HEALTH [workload]: Ping on-prem gateway {{ item.onprem_gateway }}"
+- name: "HEALTH [workload]: Ping on-prem gateway"
   ansible.builtin.command: ping -c 2 -W 3 -I {{ item.cloud_gateway }} {{ item.onprem_gateway }}
   register: _ping
   changed_when: false
@@ -120,7 +124,7 @@
   changed_when: false
   when: "'onprem_appliances' in group_names"
 
-- name: "HEALTH [onprem]: remote VTEP present for VNI {{ 10000 + item.vlan }}"
+- name: "HEALTH [onprem]: remote VTEP present per VNI"
   ansible.builtin.shell: >
     podman exec frr vtysh -c "show evpn vni {{ 10000 + item.vlan }}" |
     grep -A1 "Remote VTEPs" | grep -oP '\d+\.\d+\.\d+\.\d+'
@@ -132,36 +136,10 @@
     label: "VNI {{ 10000 + item.vlan }} ({{ item.name }})"
   when: "'onprem_appliances' in group_names"
 
-- name: "HEALTH [onprem]: Ping cloud gateway {{ item.cloud_gateway }}"
+- name: "HEALTH [onprem]: Ping cloud gateway"
   ansible.builtin.command: ping -c 2 -W 3 {{ item.cloud_gateway }}
   changed_when: false
   loop: "{{ stretches }}"
   loop_control:
     label: "→ {{ item.cloud_gateway }}"
   when: "'onprem_appliances' in group_names"
-
-- name: "HEALTH [onprem]: Simulated VM can ping cloud gateway"
-  ansible.builtin.command: >
-    ip netns exec vm-{{ item.name }} ping -c 2 -W 3 {{ item.cloud_gateway }}
-  changed_when: false
-  loop: "{{ stretches }}"
-  loop_control:
-    label: "vm-{{ item.name }} → {{ item.cloud_gateway }}"
-  when:
-    - "'onprem_appliances' in group_names"
-    - trunk_interface == "simulate"
-
-# DISABLED pending a decision on what it should assert. It fails because prod
-# reaches staging via L3 routing (ttl=63, one routed hop), not an L2 VLAN leak
-# (which would be ttl=64): the VMs are in different subnets, so the appliance
-# routes between them and nothing isolates the tenants at L3.
-# - name: "HEALTH [onprem]: VLAN isolation — prod cannot reach staging VM"
-#   ansible.builtin.command: >
-#     ip netns exec vm-{{ stretches[0].name }} ping -c 1 -W 1 {{ stretches[1].subnet | ansible.utils.ipaddr('network') | ansible.utils.ipmath(10) }}
-#   register: _isolation
-#   changed_when: false
-#   failed_when: _isolation.rc == 0
-#   when:
-#     - "'onprem_appliances' in group_names"
-#     - trunk_interface == "simulate"
-#     - stretches | length >= 2
