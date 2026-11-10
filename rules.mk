@@ -8,12 +8,13 @@ SHELL := /bin/bash
 verify: check
 
 # Static source checks aggregating the planning-docs corpus integrity, the
-# public-safety scan, the repo-wide yaml lint, and the Ansible collection checks.
+# public-safety scan, the repo-wide yaml, Markdown, python, shell and container-file lint, and the
+# Ansible collection checks.
 .PHONY: check
-check: check-corpus check-public check-yaml check-ansible
+check: check-corpus check-public check-yaml check-markdown check-python check-shell check-dockerfiles check-ansible
 
-# Planning-docs corpus integrity: link + anchor + pin resolution, embedded-snippet
-# tests, and public-safe over the plans/ docs (check-all.sh bundles them).
+# Planning-docs corpus integrity: link + anchor + pin resolution and public-safe
+# over the plans/ docs (check-all.sh bundles them).
 #
 #   make check-corpus            full run (link + pin checks need network + authenticated gh)
 #   make check-corpus OFFLINE=1  skip the network/gh checks (link + pin resolution)
@@ -48,6 +49,40 @@ check-yaml:
 	# in the check-ansible-lint target, so linting it here too would be redundant.
 	git ls-files -z -c -o --exclude-standard -- '*.yml' '*.yaml' '*.yamllint' ':(exclude)ansible/' | xargs -0 -r yamllint -c .yamllint --
 
+# Repo-wide Markdown lint with the root .markdownlint-cli2.jsonc (tool and host setup:
+# ci/markdownlint/README.md). markdownlint-cli2 reads arguments as globs; a leading ':'
+# makes each Git-selected path literal. Require the root config instead of falling back
+# to native defaults when it is missing.
+.PHONY: check-markdown
+check-markdown:
+	git ls-files -z -c -o --exclude-standard -- '*.md' | sed -z 's/^/:/' | xargs -0 -r markdownlint-cli2 --config .markdownlint-cli2.jsonc --
+
+# Repo-wide Python lint with Ruff (installed in Dockerfile.ci). --config applies the root
+# .ruff.toml everywhere, so a Ruff config in a subdirectory can't override it; --no-cache
+# because Ruff fails if it can't write a cache, and the image's source tree is read-only.
+# Prefix paths with ./ so a missing @name.py cannot become a Ruff response file.
+# Clear an inherited report destination so host checks cannot overwrite source files.
+.PHONY: check-python
+check-python:
+	git ls-files -z -c -o --exclude-standard -- '*.py' | sed -z 's|^|./|' | xargs -0 -r env -u RUFF_OUTPUT_FILE ruff check --no-cache --config .ruff.toml --
+
+# Repo-wide shell lint with ShellCheck (installed in Dockerfile.ci). --norc ignores every
+# .shellcheckrc and `env -u` drops options inherited through SHELLCHECK_OPTS, so exceptions
+# can only be in-file `# shellcheck disable=` comments.
+.PHONY: check-shell
+check-shell:
+	git ls-files -z -c -o --exclude-standard -- '*.sh' | xargs -0 -r env -u SHELLCHECK_OPTS shellcheck --norc --
+
+# Dockerfile and Containerfile lint with Hadolint (installed in Dockerfile.ci). --config and
+# `env -i` keep out host config and HADOLINT_* settings. OpenShift rewrites Dockerfile.ci
+# without comments before COPY, dropping its DL3041 pragma. Repeat that reviewed
+# package-version exception only for this root file; every other Dockerfile* and
+# Containerfile* keeps the native rules and inline pragmas. Dockerfile.ci is required.
+.PHONY: check-dockerfiles
+check-dockerfiles:
+	env -i PATH="$$PATH" hadolint --config .hadolint.yaml --no-color --ignore DL3041 -- Dockerfile.ci
+	git ls-files -z -c -o --exclude-standard -- ':(glob)**/Dockerfile*' ':(glob)**/Containerfile*' ':(top,exclude,literal)Dockerfile.ci' | xargs -0 -r env -i PATH="$$PATH" hadolint --config .hadolint.yaml --no-color --
+
 # ── Ansible collection source checks ─────────────────────────────────────────
 # Lint, playbook syntax, collection build + tarball allowlist, and a clean-env
 # install smoke with ansible-builder dependency introspection. Runs under
@@ -55,7 +90,7 @@ check-yaml:
 # touches the network is the install smoke, and only when OFFLINE is unset
 # (then it also resolves galaxy.yml's collection deps). The toolchain
 # (ansible-core, ansible-lint, yamllint, ansible-builder) is pinned in
-# Dockerfile.root.
+# Dockerfile.ci.
 
 # Collection source tree, and an out-of-tree dir for the clean-install smoke
 # (kept outside the checkout so it is neither scanned nor committed).
