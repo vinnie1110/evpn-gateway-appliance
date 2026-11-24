@@ -2,7 +2,7 @@
 
 Configures the cloud-side EVPN relay: terminates the transport from the
 on-prem appliance and configures FRR as a route relay (not a VTEP) between
-the on-prem appliance and the workload-VPC VTEP, preserving VTEP IPs
+the on-prem appliance and the workload-side VTEPs, preserving VTEP IPs
 end-to-end via `next-hop-unchanged`.
 
 This role also owns `tasks/wireguard_keys.yml`, shared with
@@ -12,10 +12,17 @@ role's comment for why).
 See [`meta/argument_specs.yml`](meta/argument_specs.yml) for the full input
 schema (`tunnel`, `bgp`, `stretches`).
 
+## Workload-side peering
+
+The relay peers with every host in the `cloud_workload` inventory group,
+reading `private_ip` from each host's vars and `workload_asn` from the role
+input. Record the peers manually in the inventory, or leave the group empty
+and let the role discover them: `frr_kubernetes_namespace` and
+`frr_kubernetes_label` must then be set, and the role reads running frr-k8s
+pods on the Ansible controller into `cloud_workload`.
+
 ## Requirements
 
-- `workload_vtep_host` must name an actual inventory host with a `private_ip`
-  host variable (defaults to `workload-router`; no multi-peer/HA support yet).
 - `stretches` (only `subnet` is read) must match the on-prem/workload stretch
   list — used to build the WireGuard server's `AllowedIPs` (wireguard
   transport only).
