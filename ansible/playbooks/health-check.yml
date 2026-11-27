@@ -3,7 +3,16 @@
 # Usage: ansible-playbook playbooks/health-check.yml
 
 - name: Run health checks
-  hosts: all
+  hosts: cloud_infra:onprem_appliances
   become: true
+  # A standalone run does not carry the peers the deploy discovered; resolve
+  # them the same way when the inventory does not list them manually.
+  pre_tasks:
+    - name: Discover OCP frr-k8s workload peers
+      ansible.builtin.include_role:
+        name: evpn_cloud_infra
+        tasks_from: discover_peers
+      when: groups['cloud_workload'] | default([]) | length <= 0
+      run_once: true
   roles:
     - evpn_health_check

@@ -22,44 +22,83 @@
     - "'cloud_infra' in group_names"
     - tunnel.type == 'wireguard'
 
-- name: "HEALTH [infra]: BGP session to workload is Established"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show bgp summary json" |
-    python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['ipv4Unicast']['peers']['{{ hostvars[workload_vtep_host].private_ip }}'];
-    assert p['state']=='Established', f'state={p[\"state\"]}'"
+# One snapshot per summary; the checks below assert against it. Poll until
+# every required peer converges; a failed poll is just "not ready" — the
+# asserts report which peers are missing.
+- name: "HEALTH [infra]: BGP sessions are Established"
+  vars:
+    _evpn_health_check_peers: "{{ [tunnel.onprem_ip] + (groups['cloud_workload'] | default([]) | map('extract', hostvars, 'private_ip') | list) }}"
+  ansible.builtin.command: podman exec frr vtysh -c "show bgp summary json"
+  register: _evpn_health_check_bgp_summary
+  until: >-
+    _evpn_health_check_bgp_summary.stdout | default('', true) is match('^\s*\{')
+    and ((_evpn_health_check_bgp_summary.stdout | from_json).get('ipv4Unicast', {}).get('peers', {})) | dict2items
+    | selectattr('key', 'in', _evpn_health_check_peers)
+    | map(attribute='value.state') | select('==', 'Established') | list | length
+    == _evpn_health_check_peers | length
+  retries: 18
+  delay: 10
   changed_when: false
+  failed_when: false
+  when: "'cloud_infra' in group_names"
+
+- name: "HEALTH [infra]: EVPN prefixes are received"
+  vars:
+    _evpn_health_check_peers: "{{ [tunnel.onprem_ip] + (groups['cloud_workload'] | default([]) | map('extract', hostvars, 'private_ip') | list) }}"
+  ansible.builtin.command: podman exec frr vtysh -c "show bgp l2vpn evpn summary json"
+  register: _evpn_health_check_evpn_summary
+  until: >-
+    _evpn_health_check_evpn_summary.stdout | default('', true) is match('^\s*\{')
+    and ((_evpn_health_check_evpn_summary.stdout | from_json).get('peers', {})) | dict2items
+    | selectattr('key', 'in', _evpn_health_check_peers)
+    | selectattr('value.pfxRcd', 'defined') | map(attribute='value.pfxRcd') | map('int') | select('>', 0) | list | length
+    == _evpn_health_check_peers | length
+  retries: 18
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when: "'cloud_infra' in group_names"
+
+- name: "HEALTH [infra]: BGP session to workload peer is Established"
+  ansible.builtin.assert:
+    that:
+      - (_evpn_health_check_bgp_summary.stdout | from_json).ipv4Unicast.peers.get(hostvars[item].private_ip, {}).get('state', 'not found') == 'Established'
+    fail_msg: >-
+      BGP session to {{ item }} ({{ hostvars[item].private_ip }}) is
+      {{ (_evpn_health_check_bgp_summary.stdout | from_json).ipv4Unicast.peers.get(hostvars[item].private_ip, {}).get('state', 'not found') }}
+  loop: "{{ groups['cloud_workload'] | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
   when: "'cloud_infra' in group_names"
 
 - name: "HEALTH [infra]: BGP session to on-prem is Established"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show bgp summary json" |
-    python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['ipv4Unicast']['peers']['{{ tunnel.onprem_ip }}'];
-    assert p['state']=='Established', f'state={p[\"state\"]}'"
-  changed_when: false
+  ansible.builtin.assert:
+    that:
+      - (_evpn_health_check_bgp_summary.stdout | from_json).ipv4Unicast.peers.get(tunnel.onprem_ip, {}).get('state', 'not found') == 'Established'
+    fail_msg: >-
+      BGP session to the on-prem appliance ({{ tunnel.onprem_ip }}) is
+      {{ (_evpn_health_check_bgp_summary.stdout | from_json).ipv4Unicast.peers.get(tunnel.onprem_ip, {}).get('state', 'not found') }}
   when: "'cloud_infra' in group_names"
 
-- name: "HEALTH [infra]: EVPN prefixes relayed from on-prem"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show bgp l2vpn evpn summary json" |
-    python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['peers']['{{ tunnel.onprem_ip }}'];
-    assert int(p['pfxRcd'])>0, f'pfxRcd={p[\"pfxRcd\"]}'"
-  changed_when: false
+- name: "HEALTH [infra]: EVPN prefixes received from on-prem"
+  ansible.builtin.assert:
+    that:
+      - ((_evpn_health_check_evpn_summary.stdout | from_json).peers.get(tunnel.onprem_ip, {}).get('pfxRcd', 0) | int) > 0
+    fail_msg: >-
+      The relay received no EVPN prefixes from the on-prem appliance
+      ({{ tunnel.onprem_ip }})
   when: "'cloud_infra' in group_names"
 
-- name: "HEALTH [infra]: EVPN prefixes relayed from workload"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show bgp l2vpn evpn summary json" |
-    python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['peers']['{{ hostvars[workload_vtep_host].private_ip }}'];
-    assert int(p['pfxRcd'])>0, f'pfxRcd={p[\"pfxRcd\"]}'"
-  changed_when: false
+- name: "HEALTH [infra]: EVPN prefixes received from workload peer"
+  ansible.builtin.assert:
+    that:
+      - ((_evpn_health_check_evpn_summary.stdout | from_json).peers.get(hostvars[item].private_ip, {}).get('pfxRcd', 0) | int) > 0
+    fail_msg: >-
+      The relay received no EVPN prefixes from {{ item }}
+      ({{ hostvars[item].private_ip }})
+  loop: "{{ groups['cloud_workload'] | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
   when: "'cloud_infra' in group_names"
 
 - name: "HEALTH [infra]: No VXLAN interfaces on relay"
@@ -68,42 +107,6 @@
   changed_when: false
   failed_when: _evpn_health_check_vxlan_ifaces.rc != 0 or _evpn_health_check_vxlan_ifaces.stdout_lines | length > 0
   when: "'cloud_infra' in group_names"
-
-# ═══════════════════════════════════════════════════════════════
-# Workload VTEP checks
-# ═══════════════════════════════════════════════════════════════
-- name: "HEALTH [workload]: BGP session to infra is Established"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show bgp summary json" |
-    python3 -c "import sys,json; d=json.load(sys.stdin);
-    p=d['ipv4Unicast']['peers']['{{ hostvars[infra_relay_host].private_ip }}'];
-    assert p['state']=='Established', f'state={p[\"state\"]}'"
-  changed_when: false
-  when: "'cloud_workload' in group_names"
-
-- name: "HEALTH [workload]: remote VTEP present per VNI"
-  ansible.builtin.shell: >
-    set -o pipefail;
-    podman exec frr vtysh -c "show evpn vni {{ 10000 + item.vlan }}" |
-    grep -A1 "Remote VTEPs" | grep -oP '\d+\.\d+\.\d+\.\d+'
-  register: _evpn_health_check_remote_vtep
-  changed_when: false
-  failed_when: _evpn_health_check_remote_vtep.stdout == ""
-  loop: "{{ stretches }}"
-  loop_control:
-    label: "VNI {{ 10000 + item.vlan }} ({{ item.name }})"
-  when: "'cloud_workload' in group_names"
-
-- name: "HEALTH [workload]: Ping on-prem gateway"
-  ansible.builtin.command: ping -c 2 -W 3 -I {{ item.cloud_gateway }} {{ item.onprem_gateway }}
-  register: _evpn_health_check_ping
-  changed_when: false
-  failed_when: _evpn_health_check_ping.rc != 0
-  loop: "{{ stretches }}"
-  loop_control:
-    label: "{{ item.cloud_gateway }} → {{ item.onprem_gateway }}"
-  when: "'cloud_workload' in group_names"
 
 # ═══════════════════════════════════════════════════════════════
 # On-prem appliance checks
@@ -138,12 +141,4 @@
   loop: "{{ stretches }}"
   loop_control:
     label: "VNI {{ 10000 + item.vlan }} ({{ item.name }})"
-  when: "'onprem_appliances' in group_names"
-
-- name: "HEALTH [onprem]: Ping cloud gateway"
-  ansible.builtin.command: ping -c 2 -W 3 {{ item.cloud_gateway }}
-  changed_when: false
-  loop: "{{ stretches }}"
-  loop_control:
-    label: "→ {{ item.cloud_gateway }}"
   when: "'onprem_appliances' in group_names"

@@ -1,7 +1,25 @@
 ---
-# Simulated-host data-plane checks. Run by the e2e AFTER the deploy and the
+# Simulated on-prem health checks. Run by the e2e AFTER the deploy and the
 # product's own evpn_health_check, to assert the fake on-prem hosts reach the
 # cloud gateway across the stretched fabric.
+#
+# When the workload side is the standalone VTEP, also run its workload-side
+# checks: the production workload side is OCP-native — not SSH-reachable, no
+# cloud_gateway SVI on the stretch subnets — so only that fixture can exercise
+# them.
+
+- name: Workload VTEP checks
+  # Runs only when the workload side is a managed standalone VTEP: discovered
+  # (native) peers never persist into this playbook's inventory, so the group
+  # is exactly "SSH-reachable workload hosts".
+  hosts: cloud_workload
+  become: true
+  tasks:
+    - name: Run workload VTEP health checks
+      ansible.builtin.include_role:
+        name: evpn_cloud_workload
+        tasks_from: healthcheck
+
 - name: Simulated on-prem health checks
   hosts: onprem_appliances
   become: true
