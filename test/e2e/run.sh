@@ -61,6 +61,38 @@ if [ ! -S "$EGA_RUNTIME_SOCK" ]; then
 	exit 1
 fi
 
+# Host kernel modules for the kind scenario: openvswitch for ovs-vswitchd,
+# br_netfilter for the route advertisements. The package must come from the
+# host's own repos — the toolchain container cannot install host-kernel modules.
+# Only scenarios whose topology attaches to the kind network need them, and
+# never the destroy stage.
+if [ "${EGA_ENTRYPOINT:-entrypoint_e2e.sh}" = entrypoint_e2e.sh ] && [ "${EGA_STAGE:-full}" != destroy ]; then
+	self_dir="$(cd "$(dirname "$0")" && pwd)"
+	if [ -n "${EGA_SCENARIOS:-}" ]; then
+		names="${EGA_SCENARIOS//,/ }"
+	else
+		names="$(cd "${self_dir}/scenarios" && for f in *.env; do echo "${f%.env}"; done)"
+	fi
+	needs_kind=false
+	for name in $names; do
+		env_file="${self_dir}/scenarios/${name}.env"
+		[ -f "$env_file" ] || continue
+		# shellcheck disable=SC1090 # scenario definitions are repository-controlled
+		topo="$( (unset EGA_TOPOLOGY; . "$env_file"; echo "${EGA_TOPOLOGY}") )"
+		if grep -Eq '^[[:space:]]*ega-kind-br:[[:space:]]*$' "${self_dir}/topology/${topo}" 2>/dev/null; then
+			needs_kind=true
+			break
+		fi
+	done
+	if [ "$needs_kind" = true ]; then
+		modprobe openvswitch 2>/dev/null || {
+			dnf install -y "kernel-modules-core-$(uname -r)"
+			modprobe openvswitch
+		}
+		modprobe br_netfilter 2>/dev/null || true
+	fi
+fi
+
 mkdir -p "$EGA_WORK_DIR" "$EGA_ARTIFACT_DIR"
 # containerlab runs in this container but creates the node containers as siblings on the
 # host. To wire their veths it needs to see the nodes' host PIDs (--pid=host) and share

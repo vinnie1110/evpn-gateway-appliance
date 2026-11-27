@@ -38,8 +38,9 @@ ee_playbook() {
 	local pb="$1"
 	echo ">> ansible-playbook ${pb} (via execution environment: $EGA_EE_IMAGE)"
 	podman-remote --url "unix://${EGA_RUNTIME_SOCK}" run --rm --net=host --user 0 \
-		-v "${lab_dir}:${lab_dir}:Z" \
+		-v "${EGA_WORK_DIR}:${EGA_WORK_DIR}:Z" \
 		-e ANSIBLE_HOST_KEY_CHECKING=False \
+		-e "KUBECONFIG=${EGA_WORK_DIR}/kubeconfig" \
 		-w "${lab_dir}" \
 		"$EGA_EE_IMAGE" \
 		ansible-playbook -i "${lab_dir}/inventory/hosts.yml" \
@@ -57,7 +58,7 @@ run_scenario() (
 		echo "error: unknown e2e scenario: $scenario (no $scenario_file)" >&2
 		exit 2
 	fi
-	# Topology selection belongs to the scenario, not the caller's environment.
+	# Topology selection and any kubeconfig belong to the scenario, not the caller's environment.
 	unset EGA_TOPOLOGY
 	# Scenario definitions are repository-controlled.
 	# shellcheck disable=SC1090
@@ -71,6 +72,8 @@ run_scenario() (
 	src_topo="${self_dir}/topology/${EGA_TOPOLOGY}"
 	inventory_src="${self_dir}/${EGA_INVENTORY}"
 	lab_name="ega-${scenario}"
+	# An ega-kind-br bridge node means the topology needs the kind cluster before clab deploy.
+	needs_kind="$(yq '.topology.nodes.ega-kind-br.kind == "bridge"' "$src_topo")"
 
 	# containerlab writes clab-<name>/ next to its topology. Stage it out of the read-only
 	# repo, with a distinct name and directory for each scenario (also for deploy/destroy).
@@ -86,16 +89,25 @@ run_scenario() (
 			echo ">> stage=deploy; leaving lab up for inspection: $topo" >&2
 			return
 		fi
+		# Attempt both teardown steps regardless of the first one's outcome, and keep
+		# any original failure: the EXIT trap runs this best-effort, while an explicit
+		# destroy fails the lane on teardown errors.
+		# cleanup_rc must not collide with the trap's rc (the scenario status).
+		cleanup_rc=0
 		echo ">> containerlab destroy: $topo"
-		containerlab destroy --name "$lab_name" -t "$topo" --cleanup
+		containerlab destroy --name "$lab_name" -t "$topo" --cleanup || cleanup_rc=$?
+		if [ "${needs_kind:-}" = "true" ]; then
+			"${self_dir}/kind/setup-cluster.sh" teardown "${EGA_WORK_DIR}" || cleanup_rc=$?
+		fi
+		return "$cleanup_rc"
 	}
 	if [ "$stage" = destroy ]; then
 		cleanup
 		exit 0
 	fi
-	# Best-effort cleanup preserves the scenario's status, including partial-deploy failures.
-	# The trap finishes before this subshell returns and the next scenario starts.
-	trap 'cleanup || true' EXIT
+	# Cleanup preserves the scenario's status when it failed; a cleanup failure
+	# after a successful scenario fails the scenario.
+	trap 'rc=$?; cleanup || [ "$rc" -ne 0 ] || rc=1; exit "$rc"' EXIT
 
 	# ansible reaches nodes over SSH; bind an ephemeral public key into each node.
 	ssh_key="${lab_dir}/ssh/id_ega"
@@ -104,6 +116,11 @@ run_scenario() (
 	chmod 644 "${ssh_key}.pub"
 	export EGA_SSH_PUBKEY="${ssh_key}.pub"
 
+	if [ "$needs_kind" = "true" ]; then
+		# Fully configured kind cluster; its kubeconfig feeds the peer discovery.
+		"${self_dir}/kind/setup-cluster.sh" setup "${EGA_WORK_DIR}"
+	fi
+
 	echo ">> containerlab deploy: $topo"
 	EGA_NODE_IMAGE="$EGA_NODE_IMAGE" containerlab deploy --name "$lab_name" -t "$topo" --reconfigure
 
@@ -111,7 +128,8 @@ run_scenario() (
 	export ANSIBLE_HOST_KEY_CHECKING=False
 	inv="${lab_dir}/clab-${lab_name}/ansible-inventory.yml"
 	echo ">> waiting for SSH on all nodes"
-	ansible -i "$inv" all -u root --private-key "$ssh_key" \
+	# The generated inventory also lists bridge nodes, which have no SSH daemon.
+	ansible -i "$inv" linux -u root --private-key "$ssh_key" \
 		-m ansible.builtin.wait_for_connection -a 'timeout=120'
 
 	# Remove the old copy first: cp -r into an existing inventory would nest it and
