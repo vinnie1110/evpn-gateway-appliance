@@ -1,0 +1,33 @@
+---
+# Workload-side checks for the standalone VTEP. Run by the emulated scenario
+# (healthcheck_emulated.yml): the production workload side is OCP-native, not
+# an SSH-reachable host running FRR, so these checks live with the fixture.
+- name: "HEALTH [workload]: BGP session to infra is Established"
+  ansible.builtin.shell: >
+    set -o pipefail;
+    podman exec frr vtysh -c "show bgp summary json" |
+    python3 -c "import sys,json; d=json.load(sys.stdin);
+    p=d['ipv4Unicast']['peers']['{{ hostvars[infra_relay_host].private_ip }}'];
+    assert p['state']=='Established', f'state={p[\"state\"]}'"
+  changed_when: false
+
+- name: "HEALTH [workload]: remote VTEP present per VNI"
+  ansible.builtin.shell: >
+    set -o pipefail;
+    podman exec frr vtysh -c "show evpn vni {{ 10000 + item.vlan }}" |
+    grep -A1 "Remote VTEPs" | grep -oP '\d+\.\d+\.\d+\.\d+'
+  register: _evpn_cloud_workload_remote_vtep
+  changed_when: false
+  failed_when: _evpn_cloud_workload_remote_vtep.stdout == ""
+  loop: "{{ stretches }}"
+  loop_control:
+    label: "VNI {{ 10000 + item.vlan }} ({{ item.name }})"
+
+- name: "HEALTH [workload]: Ping on-prem gateway"
+  ansible.builtin.command: ping -c 2 -W 3 -I {{ item.cloud_gateway }} {{ item.onprem_gateway }}
+  register: _evpn_cloud_workload_ping
+  changed_when: false
+  failed_when: _evpn_cloud_workload_ping.rc != 0
+  loop: "{{ stretches }}"
+  loop_control:
+    label: "{{ item.cloud_gateway }} → {{ item.onprem_gateway }}"
