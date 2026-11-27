@@ -27,12 +27,12 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Wait 15 seconds for BGP EVPN to converge
+    - name: Wait 30 seconds for BGP EVPN to converge
       ansible.builtin.pause:
-        seconds: 15
+        seconds: 30
 
 - name: Health checks
-  hosts: all
+  hosts: cloud_infra:onprem_appliances
   become: true
   roles:
     - evpn_health_check

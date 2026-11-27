@@ -1,7 +1,8 @@
 ---
-# Tear down the simulated on-prem environment (trunk + fake hosts). In the e2e,
-# `containerlab destroy` wipes the nodes, so this is for non-clab runs or explicit
-# cleanup — the counterpart of the simulate playbook.
+# Tear down the simulated on-prem environment (trunk + fake hosts) and the
+# standalone workload VTEP. In the e2e, `containerlab destroy` wipes the nodes,
+# so this is for non-clab runs or explicit cleanup — the counterpart of the
+# simulate and deploy_workload playbooks.
 - name: Tear down the simulated on-prem side
   hosts: onprem_appliances
   become: true
@@ -10,3 +11,26 @@
       ansible.builtin.include_role:
         name: network.evpn_gateway_test.evpn_onprem_appliance_sim
         tasks_from: teardown
+
+- name: Tear down the standalone workload VTEP
+  hosts: cloud_workload
+  become: true
+  tasks:
+    - name: Stop and remove FRR container
+      containers.podman.podman_container:
+        name: frr
+        state: absent
+
+    - name: Remove bridges and VXLAN interfaces
+      ansible.builtin.shell: |
+        {% for s in stretches %}
+        {% set vni = 10000 + s.vlan %}
+        ip link del br-vni{{ vni }} 2>/dev/null || true
+        ip link del vxlan{{ vni }} 2>/dev/null || true
+        {% endfor %}
+      changed_when: false
+
+    - name: Remove FRR config
+      ansible.builtin.file:
+        path: /etc/frr
+        state: absent
