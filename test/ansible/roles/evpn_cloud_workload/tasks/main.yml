@@ -82,7 +82,7 @@
 
 - name: Reconcile FRR configuration
   ansible.builtin.include_role:
-    name: evpn_frr
+    name: network.evpn_gateway.evpn_frr
   vars:
     evpn_frr_config_template: frr-workload-vtep.conf.j2
 
